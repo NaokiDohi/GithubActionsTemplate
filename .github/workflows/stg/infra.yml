@@ -1,0 +1,101 @@
+name: Infra CI/CD
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'terraform/env/stg/**'
+
+defaults:
+  run:
+    shell: bash
+    working-directory: terraform
+
+# AWSとのOICDでの認証認可に必要
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  TF_VERSION: 1.6.0
+  AWS_REGION: ap-northeast-1
+  ENV: stg
+
+jobs:
+  build:
+    name: "Terraform CI"
+    runs-on: ubuntu-latest
+    outputs:
+      TF_PLAN_EXITCODE: ${{ steps.plan.outputs.exitcode }}
+    steps:
+      - name: Checkout repository
+        id: checkout
+        uses: actions/checkout@v3
+      - name: Setup terraform env
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - name: Terraform format
+        run: |
+          terraform fmt -recursive -check
+      # AWSのアクセスキーを使った認証はアンチパターン。
+      # BestプラクティスはOpenID Connect(OIDC)を認証認可に使うこと。
+      # 以下はOIDCをGithub Actions-AWS間で行うためのアクションズ
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+      - name: Terraform init
+        run: |
+          terraform init -no-color
+      - name: Terraform validate
+        run: |
+          terraform validate -no-color
+      # Github ActionsでPlanを実行する場合は.tfenvでなくvarを使用して一つずつ渡す。
+      - name: Terraform plan
+        id: plan
+        continue-on-error: true
+        run: |
+          terraform plan \
+            -var 'ENV=${{ env.ENV }}' \
+            input=false \
+            -no-color \
+            -detailed-exitcode
+
+  deploy:
+    name: "Terraform CD"
+    needs: [build]
+    if: needs.build.outputs.TF_PLAN_EXITCODE == 2
+    # settings > enviroments > add で production と入力し追加する。
+    # settings > enviroments > required reviewersにチェックを入れることでJob実行時にレビューが必須になる。
+    enviroment: production
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        id: checkout
+        uses: actions/checkout@v3
+      - name: Setup terraform env
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - name: Terraform format
+        run: |
+          terraform fmt -recursive -check
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+      - name: Terraform init
+        run: |
+          terraform init -no-color
+      - name: Terraform apply
+        id: apply
+        run: |
+          terraform apply \
+            -var 'ENV=${{ env.ENV }}' \
+            input=false \
+            -no-color \
+            -auto-approve
